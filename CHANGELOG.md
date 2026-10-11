@@ -43,6 +43,9 @@ Upgrading: restart the bridge, then **re-import** the plugin (the manifest chang
 
 ### Added
 
+- **Step-by-step guide** — `docs/getting-started.md`: start the bridge, import and run
+  the plugin, paste the token (and why it exists), first commands, common problems. The README
+  explains the token flow too.
 - **Ready-made scripts, run by name.** `figmosha run <name> --args @spec.json` sends
   `scripts/<name>.js` with JSON arguments; the agent writes the spec, not the code. `run --list`,
   `run <name> --schema` and `--example`; arguments are checked against the script's schema before

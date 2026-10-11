@@ -4,6 +4,8 @@ Drive Figma from your terminal, from coding agents (Claude Code, Codex…) or fr
 
 No clipboard hacks. No screenshots.
 
+**New here?** The [step-by-step guide](docs/getting-started.md) walks through starting the bridge, connecting the plugin, the token and the first commands.
+
 Fast enough to feel synchronous: a round trip is ~2 ms over HTTP (~100 ms through the CLI, which is mostly Python starting up); a library component import ~150 ms.
 
 <img width="1269" height="779" alt="The Figmosha Bridge plugin in Figma: a green bar with the file name and a 2/2 pill" src="docs/plugin-bar-2026-10.png" />
@@ -287,6 +289,24 @@ token is refused; until 3.0 a *missing* one is still accepted with a warning —
 `--require-token` to refuse it now. Limits: 32 plugin connections plus 8 not yet authenticated,
 64 callers queued per file, 5 hellos a second, 600 s per script (`--allow-long` for an hour). Logs live in `~/.local/state/figmosha/`, not `/tmp`.
 
+### Bridge token
+
+**Why.** Anything that can reach `127.0.0.1:8787` could otherwise run code in your files, or connect
+as a fake plugin and receive the scripts and results agents send to Figma.
+
+**Where it comes from.** The bridge creates it on first start in `~/.figmosha/token`. The CLI, the MCP
+server and agents read that file themselves — nobody types it there.
+
+**Why you paste it into the plugin by hand.** The plugin runs in Figma's sandbox and cannot read files
+on disk, and the bridge must not hand the token to whoever asks for it — that would defeat the point.
+So it crosses once, through you: `figmosha token` copies it, you paste it into the red plugin bar and
+press Enter. The plugin keeps it in Figma's plugin storage, shared by every file and kept across
+restarts.
+
+**Paste it again only when** you deleted `~/.figmosha/token` (the bridge then makes a new one — that is
+how you rotate it), or you use another machine or Figma account. `figmosha token --show` prints it
+instead of copying.
+
 Two more checks stop browsers outright:
 
 - **Origin** — local clients (curl, the CLI) never send this header and browsers
@@ -323,11 +343,13 @@ https://github.com/denysosadchyi/figmosha2 — set this up for me
 
 It clones the repo, creates the venv, installs the requirements, starts the bridge, and tells you what to click in Figma. `AGENTS.md` in the repo root is written for exactly this — Codex reads it directly, Claude Code through `CLAUDE.md`, which imports it — so the agent knows the whole workflow on macOS, Linux, WSL2 or native Windows.
 
-Two things the agent cannot do for you, because Figma exposes no API for either:
+Three things the agent cannot do for you, because Figma exposes no API for them:
 
 1. **Import the plugin** — in Figma Desktop: **Plugins → Development → Import plugin from manifest…**, pick `plugin/manifest.json` from the repo. Once, ever.
 2. **Run the plugin** — **Plugins → Development → Figmosha Bridge**. A small green bar with the file's name appears; the bridge logs `[plugin] connected from 127.0.0.1`. You're live.
-3. **Paste the token, once** — if the bar turns red with a field, run `figmosha token` (it copies the token) and paste it there, Enter. Every file reuses it.
+3. **Paste the token, once** — the bar turns red with a field: run `figmosha token` (it copies the token) and paste it there, Enter. Every file reuses it. Why the token exists and why you paste it by hand: [Bridge token](#bridge-token).
+
+Step by step: [docs/getting-started.md](docs/getting-started.md).
 
 Optional: `figmosha skills install` makes the task skills available to Claude Code and Codex.
 
@@ -351,6 +373,8 @@ bash start-bridge.sh        # background (tmux session if tmux is installed); --
 The server listens on `127.0.0.1:8787`. Import and run the plugin as described above, then check it:
 
 ```bash
+./venv/bin/python figmosha.py token     # copy the token, paste it into the red plugin bar, Enter
+./venv/bin/python figmosha.py doctor
 ./venv/bin/python figmosha.py status
 # → {"plugin_connected": true, "pending": 0}
 
@@ -379,6 +403,8 @@ bash start-bridge.sh     # macOS / Linux / WSL — background, tmux not required
 # In Figma: Plugins → Development → Figmosha Bridge → Run
 ```
 
+The token is already stored in the plugin after the first paste, so a session is just these two steps.
+
 The bridge runs in the background, so it survives closing the terminal (and SSH disconnects). It does **not** survive OS reboot or WSL shutdown — restart it after either.
 
 ### Send code
@@ -396,6 +422,7 @@ cat my-script.js | python figmosha.py exec --stdin
 # Plain HTTP (no Python needed)
 curl -s http://localhost:8787/exec \
   -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $(cat ~/.figmosha/token)" \
   -d '{"code":"return 1+1"}'
 ```
 
@@ -501,6 +528,8 @@ chain and tells you which link is broken.
 |---|---|---|
 | `connection refused` from CLI | Server not running | `bash start-bridge.sh`, or `.\start-bridge.ps1` on Windows |
 | `plugin not connected` (503) | Plugin window closed | Plugins → Development → Figmosha Bridge → Run |
+| Plugin bar is red with a token field | The plugin has no token, or an old one | `figmosha token`, paste into the field, Enter |
+| `401` from the CLI or curl | Wrong `$FIGMOSHA_TOKEN`, or the token file changed while the bridge kept the old one | Fix the variable, or restart the bridge |
 | Plugin says `Reconnecting…` | Server is down or restarting | Start it; plugin auto-reconnects within 2 s |
 | 504 timeout | Code threw silently or `await` never resolved | Close the plugin (X), Run again. Increase `--timeout` for legitimately long ops |
 | `permission not specified in manifest` | API needs a permission not declared in `manifest.json` | Add to `permissions` array, sync to Windows path if applicable, **re-import** plugin |
@@ -550,7 +579,8 @@ tests/
   exec.test.js         Exec path: args, undo, checkpoint, mutated, token
   ds.test.js           Design-system helpers and every script example against a stubbed Figma
   live_ds.py           Tokens + Button set on a real scratch file, run by hand
-docs/                  README images; concurrency, plugin-api, maintaining notes; improvement plan
+docs/                  README images; concurrency, plugin-api, maintaining notes; improvement plan;
+                       getting-started.md — step-by-step setup and usage guide
 AGENTS.md              Conventions for coding agents (Codex, Claude Code…) driving Figmosha
 CLAUDE.md              One line, `@AGENTS.md`, so Claude Code loads the same file
 CLAUDE.local.md        Your machine's paths and hosts — gitignored, never committed
