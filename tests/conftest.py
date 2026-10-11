@@ -21,6 +21,9 @@ def clean_state():
             registry.clear()
         bridge.ALLOWED_HOSTS = set()
         bridge.UPDATE = None
+        bridge.TOKEN = None
+        bridge.REQUIRE_TOKEN = False
+        bridge.MAX_SECONDS = 600
     reset()
     yield
     reset()

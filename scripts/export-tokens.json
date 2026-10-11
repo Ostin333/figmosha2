@@ -1,0 +1,15 @@
+{
+  "description": "Export local variables as the same DTCG-style JSON setup-tokens reads",
+  "args": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "collection": {
+        "type": "string"
+      }
+    }
+  },
+  "example": {
+    "collection": "Color"
+  }
+}

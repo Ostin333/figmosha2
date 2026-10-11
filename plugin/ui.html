@@ -37,6 +37,14 @@
   }
   body.update #update { display: block; }
   body.update #badge { display: none; }
+  body.auth { background: #d32f2f; }
+  #token {
+    display: none; flex: 1; min-width: 0; height: 20px; padding: 0 6px;
+    border: 0; border-radius: 4px; font: inherit; font-size: 11px; font-weight: 500;
+    color: #222; background: #fff;
+  }
+  body.auth #token { display: block; }
+  body.auth #status, body.auth #badge, body.auth #fileicon { display: none; }
 
   #status { min-width: 0; line-height: 1.4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   /* With 2+ files connected the icon and "1/2" sit together in a white pill. */
@@ -66,6 +74,8 @@
   <svg id="fileicon" viewBox="0 0 16 24" aria-hidden="true"><path fill="currentColor" d="M4 .3h3.7v7.4H4A3.7 3.7 0 0 1 4 .3zM8.3.3H12a3.7 3.7 0 0 1 0 7.4H8.3zM4 8.3h3.7v7.4H4a3.7 3.7 0 0 1 0-7.4zM12 8.3a3.7 3.7 0 1 1 0 7.4 3.7 3.7 0 0 1 0-7.4zM4 16.3h3.7V20A3.7 3.7 0 1 1 4 16.3z"/></svg>
   <span id="status">Connecting…</span>
   <button id="update" type="button">Update</button>
+  <input id="token" type="password" autocomplete="off" spellcheck="false"
+         placeholder="Paste token: figmosha token, Enter">
 
 <script>
 // Icons: Solar icon set by 480 Design — CC BY 4.0
@@ -84,16 +94,26 @@ const updateEl = document.getElementById("update");
 let ws = null;
 let reconnectTimer = null;
 const recentLog = [];
-let identity = { fileKey: null, name: null, docSig: null, pluginVersion: null };
+const tokenEl = document.getElementById("token");
+let identity = { fileKey: null, name: null, docSig: null, pluginVersion: null, token: null };
+let identityKnown = false;
+let needToken = false;
 
 function sendHello() {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN || !identityKnown) return;
   try {
     ws.send(JSON.stringify({
       type: "hello", version: "2.1", plugin: identity.pluginVersion,
       fileKey: identity.fileKey, name: identity.name, docSig: identity.docSig,
+      token: identity.token || undefined,
     }));
   } catch (e) {}
+}
+
+function askForToken(on) {
+  needToken = on;
+  render();
+  if (on) setTimeout(() => tokenEl.focus(), 0);
 }
 
 // Kept for debugging via the plugin console — no longer rendered in the UI.
@@ -127,7 +147,7 @@ function render() {
     : offer ? `New version ${update.latest || ""}`.trim() : statusText;
   iconEl.innerHTML = ICONS[busy || stale ? "pending" : failed ? "err" : state] || "";
   document.body.className = (failed ? "err" : stale ? "ok outdated" : offer ? "ok update" : state)
-    + (multi ? " multi" : "") + (busy ? " busy" : "");
+    + (multi ? " multi" : "") + (busy ? " busy" : "") + (needToken ? " auth" : "");
 }
 
 // A failed exec turns the bar red for 2s, then it goes back to normal.
@@ -201,7 +221,8 @@ function connect() {
       execStarted(msg.id);
       // timeout rides along: h.ck() in code.js stops a run once it has passed.
       parent.postMessage({ pluginMessage: {
-        type: "exec", id: msg.id, code: msg.code, timeout: msg.timeout } }, "*");
+        type: "exec", id: msg.id, code: msg.code, timeout: msg.timeout,
+        args: msg.args, checkpoint: msg.checkpoint } }, "*");
     } else if (msg.type === "ping") {
       // Liveness probe: the bridge sends this when another plugin instance
       // wants the slot. Answering keeps ours.
@@ -220,6 +241,8 @@ function connect() {
       render();
     } else if (msg.type === "peers") {
       setPeers({ index: msg.index, total: msg.total });
+    } else if (msg.type === "auth") {
+      askForToken(msg.state !== "ok");
     }
   };
 
@@ -228,14 +251,26 @@ function connect() {
     log("[ws] error");
   };
 
-  ws.onclose = () => {
-    // The bridge holds one slot per open file, so a close is always transient:
-    // bridge restart, or this tab's socket dropped. Just reconnect.
+  ws.onclose = (e) => {
+    log("[ws] disconnected " + (e && e.code));
+    if (e && e.code === 4401) {
+      setStatus("Token needed", "err");
+      askForToken(true);
+      reconnectTimer = setTimeout(connect, 30000);
+      return;
+    }
     setStatus("Reconnecting…", "pending");
-    log("[ws] disconnected");
-    reconnectTimer = setTimeout(connect, 2000);
+    reconnectTimer = setTimeout(connect, e && e.code === 4429 ? 10000 : 2000);
   };
 }
+
+tokenEl.addEventListener("keydown", (e) => {
+  if (e.key !== "Enter") return;
+  const token = tokenEl.value.trim();
+  if (!token) return;
+  tokenEl.value = "";
+  parent.postMessage({ pluginMessage: { type: "set-token", token } }, "*");
+});
 
 updateEl.onclick = () => {
   if (update) parent.postMessage({ pluginMessage: { type: "open-url", url: update.url } }, "*");
@@ -245,9 +280,17 @@ window.onmessage = (e) => {
   const m = e.data && e.data.pluginMessage;
   if (!m) return;
   if (m.type === "identity") {
+    const tokenChanged = identityKnown && (m.token || null) !== identity.token;
     identity = { fileKey: m.fileKey || null, name: m.name || null, docSig: m.docSig || null,
-                 pluginVersion: m.pluginVersion || null };
+                 pluginVersion: m.pluginVersion || null, token: m.token || null };
+    identityKnown = true;
     log(`[id] file=${identity.name}`);
+    if (tokenChanged || (needToken && (!ws || ws.readyState !== WebSocket.OPEN))) {
+      askForToken(false);
+      if (ws) { ws.onclose = null; try { ws.close(); } catch (err) {} }
+      connect();
+      return;
+    }
     // Show which file this window is bound to, once the socket is up.
     if (ws && ws.readyState === WebSocket.OPEN && identity.name) setStatus(identity.name, "ok");
     sendHello();  // (re-)register this connection under the file name

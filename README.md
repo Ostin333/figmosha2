@@ -10,6 +10,23 @@ Fast enough to feel synchronous: a round trip is ~2 ms over HTTP (~100 ms throug
 
 ## What's new
 
+**Design systems in one call, fewer tokens, a locked door** (unreleased)
+
+- **Ready-made scripts.** `figmosha run setup-tokens --args @tokens.json` creates or updates a whole
+  variable collection — modes, aliases, scopes, code syntax — from DTCG-style JSON;
+  `component-set` builds a Button with every Type × Size variant, bound to your variables and laid out
+  in a grid. Re-running either changes nothing. Also `text-styles`, `effect-styles`, `bind-auto`,
+  `inventory`, `lint`, `export-tokens`, `bootstrap-file`. The agent writes JSON, never reads the
+  scripts, and bad JSON is rejected before anything reaches Figma.
+- **Agent skills** for tokens, components, styles, audits, screens and REST history:
+  `figmosha skills install` for Claude Code and Codex. AGENTS.md shrank from 22 KB to 5 KB.
+- **A bridge token.** Only callers that know `~/.figmosha/token` can run code — before, any web
+  page could connect to the plugin socket. Paste it into the plugin bar once (`figmosha token`).
+- **Safer writes.** One Cmd+Z undoes one agent call; `--checkpoint` saves a named version first;
+  replies say whether a failed script had already changed the file (`mutated`).
+- **Shorter replies**: results over 8 KB are cut with a note, `tree`/`find` are brief by default.
+- Read-only Figma REST (`versions`, `comments`, `images`), `figmosha new`, an optional MCP server.
+
 **Several agents, several files**
 
 - **Many Figma files at once.** Run the plugin in each file; pick one with
@@ -153,13 +170,14 @@ you guessing which half broke.
 
 ## HTTP API
 
-The CLI is a convenience; the wire protocol is a handful of endpoints and no
-authentication beyond being on the machine.
+The CLI is a convenience; the wire protocol is a handful of endpoints. Send the bridge token as
+`Authorization: Bearer <token>` (the CLI does). Without it a request still works for now but carries
+a `notice`; with `--require-token` it is a `401`. Every endpoint except `GET /` takes the token.
 
 | Endpoint | Body | Returns |
 |---|---|---|
-| `POST /exec` | `{code, timeout?, target?, parallel?, agent?, queue_timeout?}` | `{ok, result, value, logs, elapsed_ms, notice?}` — `notice` when the plugin or bridge runs stale code |
-| `GET /status` | — | `{version, plugin_connected, plugin_version, bridge_outdated, update, files, pending, abandoned}` — each file has `plugin` and `outdated`; `update` is `{latest, current, url}` when a newer release is out |
+| `POST /exec` | `{code, args?, timeout?, target?, checkpoint?, max_result?, parallel?, agent?, queue_timeout?}` | `{ok, result, value, logs, elapsed_ms, mutated?, checkpoint?, truncated?, notice?}` — `args` is the script's `args`; `checkpoint` saves a version first; `max_result` cuts long results |
+| `GET /status` | — | `{version, plugin_connected, plugin_version, bridge_outdated, update, files, auth, pending, abandoned}` — each file has `plugin`, `outdated`, `authed`; `auth` says whether a token is set, required, and sent by this caller |
 | `GET /targets` | — | `{files: [{name, fileKey, conn}]}` — connected Figma files |
 | `POST /clear` | `{target?, force?}` | drops a file's abandoned-script interlock |
 | `GET /` | — | service banner listing the endpoints |
@@ -247,8 +265,8 @@ python figmosha.py targets
   and returns the `504` with a `warning` and the request id. While a file has an
   abandoned script, further execs on it return `409` instead of racing an
   invisible writer. The interlock lifts by itself when the orphan finally
-  replies, or manually with `figmosha.py clear -T <file>` (`{"force": true}` on
-  `/exec` pushes past it).
+  replies, or manually with `figmosha.py clear -T <file>`. Clear only when you
+  know the orphan is harmless.
 - Long loops can cooperate with cancellation: `h.ck()` throws once the bridge
   has abandoned the run, so a chunked sweep calling it each iteration stops
   instead of mutating under the next caller. `h.aborted()` is the non-throwing
@@ -260,7 +278,16 @@ The bridge executes arbitrary JavaScript inside whichever Figma file you have
 open. That makes every web page in your browser part of the threat model —
 binding to `127.0.0.1` keeps other machines out, not other tabs.
 
-Two checks handle it:
+**The bridge token** is the main lock. On first start the bridge writes a random token to
+`~/.figmosha/token` (directory `0700`, file `0600`; `$FIGMOSHA_TOKEN` overrides it). HTTP callers
+send it as a bearer token; the plugin sends it when it connects — paste it into the plugin bar once,
+it is kept in Figma's plugin storage. A plugin connection without the right token is closed, so a
+page that opens the plugin socket from a sandboxed iframe never sees a script. Over HTTP a wrong
+token is refused; until 3.0 a *missing* one is still accepted with a warning — start the bridge with
+`--require-token` to refuse it now. Limits: 32 plugin connections plus 8 not yet authenticated,
+64 callers queued per file, 5 hellos a second, 600 s per script (`--allow-long` for an hour). Logs live in `~/.local/state/figmosha/`, not `/tmp`.
+
+Two more checks stop browsers outright:
 
 - **Origin** — local clients (curl, the CLI) never send this header and browsers
   always do on cross-origin requests, so its presence alone means the request
@@ -300,6 +327,9 @@ Two things the agent cannot do for you, because Figma exposes no API for either:
 
 1. **Import the plugin** — in Figma Desktop: **Plugins → Development → Import plugin from manifest…**, pick `plugin/manifest.json` from the repo. Once, ever.
 2. **Run the plugin** — **Plugins → Development → Figmosha Bridge**. A small green bar with the file's name appears; the bridge logs `[plugin] connected from 127.0.0.1`. You're live.
+3. **Paste the token, once** — if the bar turns red with a field, run `figmosha token` (it copies the token) and paste it there, Enter. Every file reuses it.
+
+Optional: `figmosha skills install` makes the task skills available to Claude Code and Codex.
 
 Ask the agent for the smoke test and it will confirm the round trip works end to end.
 
@@ -376,7 +406,7 @@ When the operation fits one of these, use the dedicated subcommand — much less
 ```bash
 python figmosha.py doctor                        # diagnose the chain, with fixes
 python figmosha.py sel                           # what's selected in Figma right now
-python figmosha.py tree 1:23 --depth 2           # dump subtree
+python figmosha.py tree 1:23 --depth 4           # dump subtree
 python figmosha.py tree sel --layout             # subtree of the selection, with layout
 python figmosha.py find 1:23 name=Button         # find by exact name
 python figmosha.py find 1:23 name~Btn            # substring name match
@@ -388,7 +418,17 @@ python figmosha.py clone 1:23 --right --gap 100  # clone adjacent
 python figmosha.py rm 1:99 1:100 1:101           # delete one or more nodes
 python figmosha.py icomp <component-key>         # import library component, place + zoom
 python figmosha.py status                        # bridge + plugin connection state
+python figmosha.py run --list                    # ready-made scripts
+python figmosha.py run setup-tokens --args @tokens.json -T "Design System"
+python figmosha.py run component-set --schema    # args format + example of one script
+python figmosha.py exec --file x.js --args '{"n":1}' --checkpoint "before x"
+python figmosha.py token                         # copy the bridge token for the plugin bar
+python figmosha.py skills install                # skills for Claude Code (~/.claude) and Codex (~/.agents)
+python figmosha.py rest versions -T <file>       # Figma REST, after `figma-token` and `link`
 ```
+
+`tree` shows two levels without sizes unless you pass `--depth`, `--size` or `--full`; `find`
+returns `id, name, type`. Results over 8 KB are cut with a note — `--full` lifts that.
 
 ## Code conventions
 
@@ -484,7 +524,11 @@ bridge.py              HTTP/WS server: routing, per-file queue, guard, version c
 figmosha.py            CLI client and subcommands
 start-bridge.sh        background bridge start / restart / --stop (macOS / Linux / WSL)
 start-bridge.ps1       detached launcher for native Windows (-Restart / -Stop)
+mcp_server.py          optional MCP server (figma_exec, figma_run, figma_targets), stdlib only
 requirements.txt       runtime dependency (aiohttp); requirements-dev.txt adds pytest
+scripts/               ready-made scripts for `figmosha run`: <name>.js + <name>.json (schema, example)
+skills/                agent skills; `figmosha skills install` links them
+bench/                 benchmark scenarios, run records, summarize.py → RESULTS.md
 plugin/
   manifest.json        Permissions + allowed origins
   code.js              Plugin sandbox: exec, the h.* helpers, PLUGIN_VERSION
@@ -497,8 +541,16 @@ tests/
   test_fuzz.py         Random scenarios with invariant checks, hostile input, soak
   test_plugin_version.py   Fails if plugin/ changes without a PLUGIN_VERSION bump
   live_stress.py       Run by hand against your real open files
+  test_auth.py         Bridge token, limits, rogue plugin connections
+  test_exec_options.py args, checkpoint, max_result, mutated
+  test_cli.py          run / schema validation / skills / REST / new
+  test_mcp.py          MCP server
+  test_js.py           Runs the Node suites below
   helpers.test.js      Pure helpers against a stubbed Figma (needs Node)
-docs/                  README images
+  exec.test.js         Exec path: args, undo, checkpoint, mutated, token
+  ds.test.js           Design-system helpers and every script example against a stubbed Figma
+  live_ds.py           Tokens + Button set on a real scratch file, run by hand
+docs/                  README images; concurrency, plugin-api, maintaining notes; improvement plan
 AGENTS.md              Conventions for coding agents (Codex, Claude Code…) driving Figmosha
 CLAUDE.md              One line, `@AGENTS.md`, so Claude Code loads the same file
 CLAUDE.local.md        Your machine's paths and hosts — gitignored, never committed
@@ -525,11 +577,22 @@ No Figma needed — fake plugins drive the bridge over a real WebSocket:
 
 ```bash
 pip install -r requirements-dev.txt
-pytest -q                                   # ~130 tests: bridge, queue, stress, chaos, fuzz (40 scenarios)
+pytest -q                                   # ~220 tests: bridge, auth, queue, stress, fuzz, CLI, MCP, Node suites
 FIGMOSHA_FUZZ_SEEDS=1000 pytest -q          # the long fuzz run (~15 min)
-node tests/helpers.test.js                  # pure helpers: hex maths, auto-layout ordering (optional, needs Node)
+node tests/ds.test.js                       # design-system helpers alone (pytest runs all *.test.js when Node is installed)
+python tests/live_ds.py <doc id>            # tokens + Button set twice on a scratch copy of a file
 python tests/live_stress.py 20              # against your real open files: 20 agents per file, no lost update
 ```
+
+## MCP server (optional)
+
+For clients without a shell (Claude Desktop and similar), `mcp_server.py` exposes three tools over stdio: `figma_exec`, `figma_run` and `figma_targets`. It needs no extra dependencies.
+
+```json
+{"mcpServers": {"figmosha": {"command": "<checkout>/venv/bin/python", "args": ["<checkout>/mcp_server.py"]}}}
+```
+
+Where the agent has a shell, the CLI plus skills is cheaper in tokens and preferred.
 
 ## Changelog
 

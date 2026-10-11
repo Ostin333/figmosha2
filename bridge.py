@@ -18,10 +18,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import collections
 import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import sys
 import time
 import uuid
@@ -37,6 +40,84 @@ SLOT_PROBE_TIMEOUT = 1.0  # how long an incumbent connection has to answer a pin
 LOCKS: dict = {}          # conn_id -> asyncio.Lock — one exec at a time per file
 ABANDONED: dict = {}      # rid -> {"conn", "t0", "timeout"} — timed out, may still be running
 QUEUE: dict = {}          # conn_id -> {"waiting": [{agent, since}], "running": {agent, since} | None}
+
+TOKEN: str | None = None
+REQUIRE_TOKEN = False
+MAX_PLUGINS = 32
+MAX_UNADMITTED = 8
+MAX_WAITING = 64
+HELLO_GRACE = 5.0
+HELLO_RATE = 5
+AUTH_NOTICE = web.RequestKey("auth_notice", str) if hasattr(web, "RequestKey") else "figmosha_auth_notice"
+AUTH_CLOSE = 4401
+LIMIT_CLOSE = 4429
+NO_TOKEN_NOTICE = ("no bridge token sent — Figmosha 3.0 will refuse this with 401. "
+                   "The figmosha CLI sends it automatically; for curl add "
+                   "-H \"Authorization: Bearer $(cat ~/.figmosha/token)\"")
+
+
+def figmosha_home() -> Path:
+    return Path(os.environ.get("FIGMOSHA_HOME") or Path.home() / ".figmosha")
+
+
+def load_token() -> str:
+    env = os.environ.get("FIGMOSHA_TOKEN", "").strip()
+    if env:
+        return env
+    path = figmosha_home() / "token"
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError:
+        pass
+    for _ in range(50):
+        try:
+            text = path.read_text(encoding="utf-8").strip()
+            if text:
+                return text
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        token = secrets.token_urlsafe(32)
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        except FileExistsError:
+            time.sleep(0.02)
+            continue
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(token + "\n")
+        return token
+    raise RuntimeError(f"could not read or create {path}")
+
+
+def token_ok(value) -> bool:
+    if TOKEN is None or not isinstance(value, str) or not value:
+        return False
+    return hmac.compare_digest(value.encode("utf-8"), TOKEN.encode("utf-8"))
+
+
+def _check_token(request: web.Request):
+    if TOKEN is None:
+        return None
+    header = request.headers.get("Authorization")
+    if header is not None:
+        scheme, _, value = header.strip().partition(" ")
+        if scheme.lower() == "bearer" and token_ok(value.strip()):
+            return None
+        return web.json_response(
+            {"ok": False, "error": "invalid bridge token",
+             "hint": "the token lives in ~/.figmosha/token (or $FIGMOSHA_TOKEN); "
+                     "`figmosha token` prints it"},
+            status=401)
+    if REQUIRE_TOKEN:
+        return web.json_response(
+            {"ok": False, "error": "missing bridge token",
+             "hint": "send Authorization: Bearer <token>; the figmosha CLI does it for you, "
+                     "`figmosha token` prints it"},
+            status=401)
+    request[AUTH_NOTICE] = NO_TOKEN_NOTICE
+    return None
+
 
 # Host: values accepted in the Host header. Populated in main() from the bind
 # address. Empty set means "don't check" — chosen when the user binds a
@@ -205,7 +286,7 @@ def _lock_for(key):
     return lock
 
 
-def _guard(request: web.Request, *, allow_null_origin: bool = False):
+def _guard(request: web.Request, *, allow_null_origin: bool = False, auth: bool = True):
     """Reject browser-driven requests. Returns an error Response, or None if OK.
 
     The bridge executes arbitrary JS inside the user's Figma file, so any web
@@ -239,7 +320,7 @@ def _guard(request: web.Request, *, allow_null_origin: bool = False):
                          "and the Figma plugin"},
                 status=403,
             )
-    return None
+    return _check_token(request) if auth else None
 
 
 ERROR_HINTS = [
@@ -332,7 +413,7 @@ async def _broadcast_peers():
 
 async def plugin_ws_handler(request: web.Request):
     # CSRF/rebinding guard (upstream): the plugin UI iframe reports Origin "null".
-    blocked = _guard(request, allow_null_origin=True)
+    blocked = _guard(request, allow_null_origin=True, auth=False)
     if blocked is not None:
         print(f"[plugin] refused connection from {request.remote} "
               f"(origin={request.headers.get('Origin')!r})")
@@ -345,9 +426,21 @@ async def plugin_ws_handler(request: web.Request):
     # (fileKey / file name) arrives in the `hello` message a moment after connect.
     # Reconnects never lock out: a stale same-file connection is replaced at
     # `hello` time, so no incumbent check is needed in the multi-file model.
+    open_ = [i for i in PLUGINS.values() if not i["ws"].closed]
+    admitted = sum(1 for i in open_ if i.get("admitted"))
+    if admitted >= MAX_PLUGINS or len(open_) - admitted >= MAX_UNADMITTED:
+        print(f"[plugin] refused connection from {request.remote}: too many plugin connections")
+        await ws.close(code=LIMIT_CLOSE, message=b"too many plugin connections")
+        return ws
+
     conn_id = str(uuid.uuid4())
-    PLUGINS[conn_id] = {"ws": ws, "fileKey": None, "name": None, "docSig": None}
+    PLUGINS[conn_id] = {"ws": ws, "fileKey": None, "name": None, "docSig": None,
+                        "admitted": TOKEN is None, "authed": TOKEN is None}
     print(f"[plugin] connected {conn_id[:8]} from {request.remote}")
+    hellos = collections.deque()
+    grace = None
+    if TOKEN is not None:
+        grace = asyncio.get_running_loop().create_task(_close_unless_admitted(conn_id, ws))
 
     try:
         async for msg in ws:
@@ -360,12 +453,22 @@ async def plugin_ws_handler(request: web.Request):
             try:
                 m = json.loads(msg.data)
             except json.JSONDecodeError:
-                print(f"[plugin] bad json: {msg.data[:200]!r}")
+                print(f"[plugin] bad json ({len(msg.data)} bytes) from {conn_id[:8]}")
                 continue
 
             mtype = m.get("type")
 
             if mtype == "hello":
+                now = time.monotonic()
+                hellos.append(now)
+                while hellos and now - hellos[0] > 1.0:
+                    hellos.popleft()
+                if len(hellos) > HELLO_RATE:
+                    print(f"[plugin] {conn_id[:8]} sent more than {HELLO_RATE} hellos a second — closing")
+                    await ws.close(code=LIMIT_CLOSE, message=b"hello rate limit")
+                    break
+                if not await _admit(conn_id, ws, m.get("token")):
+                    break
                 file_key = m.get("fileKey")
                 name = m.get("name")
                 doc_sig = m.get("docSig")
@@ -420,6 +523,8 @@ async def plugin_ws_handler(request: web.Request):
                 await _send_update(ws)
                 await _broadcast_peers()
                 continue
+            if not PLUGINS.get(conn_id, {}).get("admitted"):
+                continue
             if mtype == "pong":
                 # Answer to a liveness probe: this slot is defended, so a new
                 # connection for the same file will not take it over.
@@ -438,13 +543,14 @@ async def plugin_ws_handler(request: web.Request):
                 # Only a final reply counts: an orphan's `log` lines mean it is
                 # still running, and lifting the interlock on those let the next
                 # caller write alongside it.
-                orphan = ABANDONED.pop(rid, None)
-                if orphan is not None:
+                orphan = ABANDONED.get(rid)
+                if orphan is not None and orphan.get("conn") == conn_id:
+                    ABANDONED.pop(rid, None)
                     late = time.time() - orphan["t0"]
                     print(f"[orphan] {rid[:8]} finished after {late:.0f}s "
                           f"({mtype}) — client already received a 504")
             entry = PENDING.get(rid)
-            if not entry:
+            if not entry or entry.get("conn") != conn_id:
                 continue
 
             if mtype == "log":
@@ -461,6 +567,8 @@ async def plugin_ws_handler(request: web.Request):
                 if not entry["future"].done():
                     entry["future"].set_result(m)
     finally:
+        if grace is not None:
+            grace.cancel()
         key = _doc_key(conn_id)
         PLUGINS.pop(conn_id, None)
         # The lock belongs to the document: keep it while another tab on the same
@@ -489,7 +597,40 @@ async def plugin_ws_handler(request: web.Request):
 
 def _live_plugins():
     """Connected, non-closed plugin slots as a list of (conn_id, info)."""
-    return [(cid, i) for cid, i in PLUGINS.items() if not i["ws"].closed]
+    return [(cid, i) for cid, i in PLUGINS.items()
+            if not i["ws"].closed and i.get("admitted", True)]
+
+
+async def _admit(conn_id, ws, token) -> bool:
+    info = PLUGINS.get(conn_id)
+    if info is None:
+        return False
+    if TOKEN is None:
+        info["admitted"] = True
+        return True
+    if token_ok(token):
+        info["admitted"] = info["authed"] = True
+        await _send_auth(ws, "ok")
+        return True
+    print(f"[plugin] {conn_id[:8]} refused: {'invalid' if token else 'missing'} token")
+    await _send_auth(ws, "invalid" if token else "missing")
+    await ws.close(code=AUTH_CLOSE, message=b"bridge token required")
+    return False
+
+
+async def _send_auth(ws, state):
+    try:
+        await ws.send_str(json.dumps({"type": "auth", "state": state}))
+    except Exception:
+        pass
+
+
+async def _close_unless_admitted(conn_id, ws):
+    await asyncio.sleep(HELLO_GRACE)
+    info = PLUGINS.get(conn_id)
+    if info is not None and not info.get("admitted") and not ws.closed:
+        print(f"[plugin] {conn_id[:8]} sent no valid hello in {HELLO_GRACE:g}s — closing")
+        await ws.close(code=AUTH_CLOSE, message=b"bridge token required")
 
 
 def resolve_target(target):
@@ -592,8 +733,21 @@ async def exec_handler(request: web.Request) -> web.Response:
         return bad(str(e))
     parallel = body.get("parallel", False) is True
     force = body.get("force", False) is True
+    checkpoint = body.get("checkpoint")
+    if checkpoint is not None and (not isinstance(checkpoint, str) or not checkpoint.strip()
+                                   or len(checkpoint) > 80):
+        return bad("'checkpoint' must be a label of 1-80 characters")
+    max_result = body.get("max_result", 0)
+    if isinstance(max_result, bool) or not isinstance(max_result, int) or max_result < 0:
+        return bad("'max_result' must be a non-negative number of bytes (0 = no limit)")
+    extra = {}
+    if "args" in body:
+        extra["args"] = body["args"]
+    if checkpoint is not None:
+        extra["checkpoint"] = checkpoint.strip()
     agent = body.get("agent")
     agent = agent.strip()[:40] or None if isinstance(agent, str) else None
+    notice = request.get(AUTH_NOTICE)
 
     conn_id, info = resolve_target(target)
     if conn_id is None:
@@ -604,12 +758,23 @@ async def exec_handler(request: web.Request) -> web.Response:
     target_ws = info["ws"]
 
     # Reads are safe to fan out; anything that mutates must take the file's lock.
+    if force:
+        print(f"[force] {agent or 'unnamed caller'} sent force:true to {info.get('name')!r}")
     if parallel:
-        return await _dispatch(target_ws, conn_id, code, timeout, force)
+        return await _dispatch(target_ws, conn_id, code, timeout, force,
+                               meta={"notice": notice}, extra=extra, max_result=max_result)
 
     key = _doc_key(conn_id)
     lock = _lock_for(key)
     q = QUEUE.setdefault(key, {"waiting": [], "running": None})
+    if len(q["waiting"]) >= MAX_WAITING:
+        return web.json_response({
+            "ok": False,
+            "error": (f"queue full: {len(q['waiting'])} callers are already waiting for this "
+                      f"file. Nothing was run; retry later."),
+            "busy": {"running": (q["running"] or {}).get("agent"),
+                     "waiting": len(q["waiting"])},
+        }, status=503)
     me = {"agent": agent, "since": time.time()}
     q["waiting"].append(me)
     try:
@@ -646,13 +811,15 @@ async def exec_handler(request: web.Request) -> web.Response:
                                      status=499)
         q["running"] = {"agent": agent, "since": time.time()}
         return await _dispatch(target_ws, conn_id, code, timeout, force,
-                               meta={"queued_ms": queued_ms})
+                               meta={"queued_ms": queued_ms, "notice": notice},
+                               extra=extra, max_result=max_result)
     finally:
         q["running"] = None
         lock.release()
 
 
-MAX_SECONDS = 3600  # one hour; a longer exec is a bug, not a plan
+MAX_SECONDS = 600
+LONG_MAX_SECONDS = 3600
 
 
 def _seconds(value, name) -> float:
@@ -725,7 +892,8 @@ def _abandon(rid, conn_id, timeout, target_ws):
     asyncio.get_running_loop().create_task(_send_abort(target_ws, rid))
 
 
-async def _dispatch(target_ws, conn_id, code, timeout, force, meta=None) -> web.Response:
+async def _dispatch(target_ws, conn_id, code, timeout, force, meta=None, extra=None,
+                    max_result=0) -> web.Response:
     """Send one exec to a plugin and await its reply. Caller holds the lock."""
     # Per document, not per connection: a timed-out script in one tab still
     # runs in the document a caller routed through another tab would write to.
@@ -736,8 +904,8 @@ async def _dispatch(target_ws, conn_id, code, timeout, force, meta=None) -> web.
             "ok": False,
             "error": (f"a previous script on this file timed out and may still be running "
                       f"(rid {stale[0][:8]}) — its mutations were not rolled back. Wait for "
-                      f"it to finish, POST /clear to drop the interlock, or resend with "
-                      f"\"force\": true."),
+                      f"it to finish, or ask the user before dropping the interlock with "
+                      f"`figmosha clear`."),
             "abandoned": [r[:8] for r in stale],
         }, status=409)
 
@@ -758,7 +926,7 @@ async def _dispatch(target_ws, conn_id, code, timeout, force, meta=None) -> web.
             # write awaits the socket). So the send always completes, and a caller
             # cancelled here is treated like any caller that left mid-run.
             send = asyncio.ensure_future(target_ws.send_str(json.dumps(
-                {"id": rid, "type": "exec", "code": code, "timeout": timeout})))
+                {"id": rid, "type": "exec", "code": code, "timeout": timeout, **(extra or {})})))
             try:
                 await asyncio.shield(send)
             except asyncio.CancelledError:
@@ -800,7 +968,7 @@ async def _dispatch(target_ws, conn_id, code, timeout, force, meta=None) -> web.
                 "logs": list(entry.get("logs", [])),
             }, status=504)
 
-        return _reply(PENDING[rid], result, meta)
+        return _reply(PENDING[rid], result, meta, max_result)
     finally:
         # Always reap, including on client disconnect / task cancellation —
         # otherwise /status `pending` inflates permanently.
@@ -827,7 +995,34 @@ def _result_text(result) -> str:
     return json.dumps(value, indent=2, ensure_ascii=False)
 
 
-def _reply(entry, result, meta=None) -> web.Response:
+def _truncate(body, limit):
+    text = body.get("result")
+    if not limit or not isinstance(text, str) or len(text.encode("utf-8")) <= limit:
+        return
+    value = body.get("value")
+    if isinstance(value, list):
+        if len(json.dumps(value, ensure_ascii=False).encode("utf-8")) <= limit:
+            body["result"] = json.dumps(value, ensure_ascii=False)
+            return
+        keep, size = [], 2
+        for item in value:
+            size += len(json.dumps(item, ensure_ascii=False).encode("utf-8")) + 2
+            if size > limit:
+                break
+            keep.append(item)
+        body["value"] = keep
+        body["result"] = json.dumps(keep, ensure_ascii=False)
+        body["truncated"] = {"shown": len(keep), "total": len(value), "unit": "items"}
+    else:
+        cut = text.encode("utf-8")[:limit].decode("utf-8", "ignore")
+        body["value"] = cut if isinstance(value, str) else None
+        body["result"] = cut
+        body["truncated"] = {"shown": len(cut), "total": len(text), "unit": "chars"}
+    body["truncated"]["hint"] = ("result cut to max_result bytes — return less "
+                                 "(ids, names, counts), or resend with max_result 0 / --full")
+
+
+def _reply(entry, result, meta=None, max_result=0) -> web.Response:
     elapsed_ms = int((time.time() - entry["t0"]) * 1000)
 
     if result.get("type") == "error":
@@ -840,6 +1035,8 @@ def _reply(entry, result, meta=None) -> web.Response:
             "logs": entry["logs"],
             "elapsed_ms": elapsed_ms,
         }
+        if "mutated" in result:
+            body["mutated"] = result["mutated"]
         status = 500
     else:
         body = {
@@ -849,13 +1046,18 @@ def _reply(entry, result, meta=None) -> web.Response:
             "logs": entry["logs"],
             "elapsed_ms": elapsed_ms,
         }
+        for key in ("mutated", "checkpoint"):
+            if key in result:
+                body[key] = result[key]
+        _truncate(body, max_result)
         status = 200
 
-    # Agents read responses, not the plugin bar — so say it here too.
-    notice = _version_notice(PLUGINS.get(entry.get("conn")) or {})
+    meta = dict(meta or {})
+    notices = [meta.pop("notice", None), _version_notice(PLUGINS.get(entry.get("conn")) or {})]
+    notice = "; ".join(n for n in notices if n)
     if notice:
         body["notice"] = notice
-    body.update(meta or {})
+    body.update(meta)
     return web.json_response(body, status=status)
 
 
@@ -883,7 +1085,7 @@ def _files_payload():
     for cid, i in live:
         key = (i.get("name"), i.get("docSig"))
         entry = {"name": i.get("name"), "fileKey": i.get("fileKey"), "conn": cid[:8],
-                 "doc": i.get("docSig"),
+                 "doc": i.get("docSig"), "authed": bool(i.get("authed")),
                  "plugin": i.get("pluginVersion"), "outdated": plugin_outdated(i)}
         q = QUEUE.get(_doc_key(cid)) or {}
         running = q.get("running")
@@ -915,6 +1117,9 @@ async def status_handler(request: web.Request) -> web.Response:
         "bridge_outdated": bridge_outdated(),
         "update": UPDATE,
         "files": files,
+        "auth": {"token": TOKEN is not None, "required": REQUIRE_TOKEN,
+                 "caller": "missing" if request.get(AUTH_NOTICE) else
+                           ("ok" if TOKEN is not None else "off")},
         "pending": len(PENDING),
         "abandoned": [
             {"rid": r[:8], "conn": o["conn"][:8], "age_s": int(time.time() - o["t0"])}
@@ -937,6 +1142,8 @@ async def clear_handler(request: web.Request) -> web.Response:
     if target is not None and not isinstance(target, str):
         return web.json_response(
             {"ok": False, "error": "'target' must be a string: a file name or doc id"}, status=400)
+    agent = body.get("agent") if isinstance(body, dict) else None
+    agent = agent.strip()[:40] or None if isinstance(agent, str) else None
 
     conn_id, info = resolve_target(target)
     if conn_id is None:
@@ -948,6 +1155,8 @@ async def clear_handler(request: web.Request) -> web.Response:
     dropped = [r for r, o in list(ABANDONED.items()) if o.get("doc", o.get("conn")) == doc]
     for r in dropped:
         ABANDONED.pop(r, None)
+    print(f"[clear] {agent or 'unnamed caller'} cleared {len(dropped)} interlock(s) "
+          f"on {info.get('name')!r}")
     return web.json_response({"ok": True, "cleared": [r[:8] for r in dropped],
                               "file": info.get("name")})
 
@@ -961,7 +1170,7 @@ async def targets_handler(request: web.Request) -> web.Response:
 
 
 async def root_handler(request: web.Request) -> web.Response:
-    blocked = _guard(request)
+    blocked = _guard(request, auth=False)
     if blocked is not None:
         return blocked
 
@@ -969,15 +1178,33 @@ async def root_handler(request: web.Request) -> web.Response:
         "service": "figmosha-bridge",
         "version": "2.0",
         "endpoints": {
-            "POST /exec": ("{code, target?, timeout?, parallel?, force?} -> "
-                           "{ok, result, value, logs, elapsed_ms}. Serialized per file "
-                           "unless parallel:true (reads only)."),
+            "POST /exec": ("{code, target?, args?, timeout?, checkpoint?, max_result?, "
+                           "parallel?, force?} -> {ok, result, value, logs, elapsed_ms, "
+                           "mutated?, truncated?}. Serialized per file unless parallel:true "
+                           "(reads only). Needs Authorization: Bearer <token>."),
             "GET /status": "{plugin_connected, files, pending, abandoned}",
             "GET /targets": "{files: [{name, fileKey, conn}]}",
             "POST /clear": "{target} -> drop a file's abandoned-script interlock after a 504",
             "WS /plugin": "Figma plugin connects here (one per open file)",
         },
     })
+
+
+def configure(*, require_token=False, no_token=False, allow_long=False):
+    global TOKEN, REQUIRE_TOKEN, MAX_SECONDS
+    if allow_long:
+        MAX_SECONDS = LONG_MAX_SECONDS
+    if no_token:
+        TOKEN, REQUIRE_TOKEN = None, False
+        print("[bridge] WARNING: --insecure-no-token — anything on this machine, "
+              "including web pages, can run code in your Figma files")
+        return
+    TOKEN = load_token()
+    REQUIRE_TOKEN = require_token
+    source = "$FIGMOSHA_TOKEN" if os.environ.get("FIGMOSHA_TOKEN", "").strip() else \
+        str(figmosha_home() / "token")
+    print(f"[bridge] token from {source} — "
+          + ("required" if REQUIRE_TOKEN else "optional for now (pass --require-token to enforce)"))
 
 
 def build_app() -> web.Application:
@@ -1006,7 +1233,15 @@ def main():
     ap = argparse.ArgumentParser(description="Figmosha 2.0 bridge server")
     ap.add_argument("--host", default="127.0.0.1", help="bind host (default 127.0.0.1)")
     ap.add_argument("--port", type=int, default=8787, help="bind port (default 8787)")
+    ap.add_argument("--require-token", action="store_true",
+                    help="refuse HTTP requests and plugins without the bridge token")
+    ap.add_argument("--insecure-no-token", action="store_true",
+                    help="no token at all: any local process or page can run code in Figma")
+    ap.add_argument("--allow-long", action="store_true",
+                    help=f"accept timeouts up to {LONG_MAX_SECONDS}s (default cap {MAX_SECONDS}s)")
     args = ap.parse_args()
+    configure(require_token=args.require_token, no_token=args.insecure_no_token,
+              allow_long=args.allow_long)
 
     if args.host in ("127.0.0.1", "localhost", "::1"):
         ALLOWED_HOSTS = {

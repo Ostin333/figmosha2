@@ -1,0 +1,33 @@
+{
+  "description": "Find unbound colours/spacing/radii, frames without auto layout, detached copies, unstyled text",
+  "args": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "root": {
+        "type": "string"
+      },
+      "rules": {
+        "type": "array",
+        "items": {
+          "enum": [
+            "unbound-color",
+            "unbound-spacing",
+            "unbound-radius",
+            "no-autolayout",
+            "detached",
+            "text-no-style"
+          ]
+        }
+      },
+      "limit": {
+        "type": "integer",
+        "minimum": 0
+      }
+    }
+  },
+  "example": {
+    "root": "page",
+    "limit": 20
+  }
+}

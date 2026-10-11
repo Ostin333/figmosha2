@@ -7,7 +7,7 @@
 #   .\start-bridge.ps1 -Restart   # stop whatever holds the port, then start
 #   .\start-bridge.ps1 -Stop      # just stop
 #
-# Logs go to bridge.out.log next to this script.
+# Logs go to %LOCALAPPDATA%\figmosha\bridge.out.log and bridge.err.log.
 #
 # Keep this file pure ASCII: Windows PowerShell 5.1 reads a BOM-less script as
 # ANSI, so a single em dash or arrow breaks parsing of the whole file.
@@ -20,7 +20,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$log = Join-Path $root "bridge.out.log"
+$state = Join-Path $env:LOCALAPPDATA "figmosha"
+New-Item -ItemType Directory -Force -Path $state | Out-Null
+$log = Join-Path $state "bridge.out.log"
+$errLog = Join-Path $state "bridge.err.log"
 
 # Prefer the venv interpreter, fall back to whatever python is on PATH.
 $python = Join-Path $root "venv\Scripts\python.exe"
@@ -74,7 +77,7 @@ Start-Process -FilePath $python `
     -ArgumentList "-u `"$(Join-Path $root 'bridge.py')`" --port $Port" `
     -WorkingDirectory $root `
     -RedirectStandardOutput $log `
-    -RedirectStandardError (Join-Path $root "bridge.err.log") `
+    -RedirectStandardError $errLog `
     -WindowStyle Hidden | Out-Null
 
 Start-Sleep -Seconds 2
@@ -85,7 +88,6 @@ if ($now) {
     Write-Host "now run the plugin: Figma > Plugins > Development > Figmosha Bridge"
 } else {
     # Python puts the actual reason (a missing aiohttp, a taken port) on stderr.
-    $errLog = Join-Path $root "bridge.err.log"
     Write-Host "bridge did not come up - last lines of bridge.err.log:" -ForegroundColor Red
     if (Test-Path $errLog) { Get-Content $errLog -Tail 20 }
     if ((Get-Content $errLog -Raw -ErrorAction SilentlyContinue) -match "No module named 'aiohttp'") {

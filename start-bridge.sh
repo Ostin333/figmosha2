@@ -1,22 +1,28 @@
 #!/usr/bin/env bash
 # Start (or restart) the Figmosha bridge in the background — macOS / Linux / WSL.
 #
-#   bash start-bridge.sh           # start, or restart if it is already running
-#   bash start-bridge.sh --stop    # stop it
+#   bash start-bridge.sh                   # start, or restart if it is already running
+#   bash start-bridge.sh --require-token   # any other flags go to bridge.py
+#   bash start-bridge.sh --stop            # stop it
 #
 # Runs inside a detached tmux session when tmux is installed (attach to watch it),
 # otherwise as a plain background process. macOS has no tmux out of the box, so
-# that fallback is what most Macs get. Log: /tmp/figmosha-bridge.log
+# that fallback is what most Macs get.
+# Log and pid file: ${XDG_STATE_HOME:-~/.local/state}/figmosha/, readable only by you.
 #
 # Python: ./venv/bin/python if the venv exists, else $FIGMOSHA_PYTHON, else
 # python3 (macOS has no `python` command). Port: $FIGMOSHA_PORT, default 8787.
 set -u
+umask 077
 cd "$(dirname "$0")"
 
 SESSION="figmosha-bridge"
 PORT="${FIGMOSHA_PORT:-8787}"
-LOG="/tmp/figmosha-bridge.log"
-PIDFILE="/tmp/figmosha-bridge-$PORT.pid"
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/figmosha"
+mkdir -p "$STATE"
+chmod 700 "$STATE"
+LOG="$STATE/bridge.log"
+PIDFILE="$STATE/bridge-$PORT.pid"
 
 if [ -x ./venv/bin/python ]; then
     PY=./venv/bin/python
@@ -28,7 +34,7 @@ else
     PY=python
 fi
 
-up() { curl -sf "http://127.0.0.1:$PORT/status" >/dev/null 2>&1; }
+up() { curl -sf "http://127.0.0.1:$PORT/" >/dev/null 2>&1; }
 # Anything at all listening on the port — a bridge, or some other program.
 taken() { (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; }
 
@@ -38,7 +44,11 @@ stop() {
         tmux kill-session -t "$SESSION"; was=0
     fi
     if [ -f "$PIDFILE" ]; then
-        kill "$(cat "$PIDFILE")" 2>/dev/null && was=0
+        local pid
+        pid="$(cat "$PIDFILE")"
+        if [ -O "$PIDFILE" ] && [ -n "$pid" ] && ps -p "$pid" -o command= 2>/dev/null | grep -q "bridge.py"; then
+            kill "$pid" 2>/dev/null && was=0
+        fi
         rm -f "$PIDFILE"
     fi
     # Wait for the port to free up, so a restart doesn't race the old process.
@@ -63,6 +73,9 @@ fi
 
 stop || true   # silent, unless the port is held by something else (then it exits)
 
+BRIDGE_ARGS=""
+for a in "$@"; do BRIDGE_ARGS="$BRIDGE_ARGS $(printf '%q' "$a")"; done
+
 if ! "$PY" -c "import aiohttp" 2>/dev/null; then
     echo "[start-bridge] $PY cannot import aiohttp. Set up the venv first:"
     echo "    python3 -m venv venv && ./venv/bin/pip install -r requirements.txt"
@@ -72,10 +85,10 @@ fi
 # -u: without it Python block-buffers stdout into the log, and plugin
 # connect/disconnect events stay invisible exactly when you need them.
 if command -v tmux >/dev/null 2>&1; then
-    tmux new-session -d -s "$SESSION" "$PY -u bridge.py --port $PORT 2>&1 | tee $LOG"
+    tmux new-session -d -s "$SESSION" "umask 077; $PY -u bridge.py --port $PORT$BRIDGE_ARGS 2>&1 | tee $(printf '%q' "$LOG")"
     how="tmux session '$SESSION' — watch: tmux attach -t $SESSION"
 else
-    nohup "$PY" -u bridge.py --port "$PORT" >"$LOG" 2>&1 &
+    nohup "$PY" -u bridge.py --port "$PORT" "$@" >"$LOG" 2>&1 &
     echo $! >"$PIDFILE"
     how="background process $(cat "$PIDFILE") — watch: tail -f $LOG"
 fi

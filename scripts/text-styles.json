@@ -1,0 +1,94 @@
+{
+  "description": "Create or update text styles; sizes may be numbers or FLOAT variable names",
+  "checkpoint": true,
+  "args": {
+    "type": "object",
+    "required": [
+      "styles"
+    ],
+    "properties": {
+      "styles": {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+          "type": "object",
+          "required": [
+            "name",
+            "fontFamily"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "fontFamily": {
+              "type": "string"
+            },
+            "fontStyle": {
+              "type": "string"
+            },
+            "fontSize": {
+              "type": [
+                "number",
+                "string"
+              ]
+            },
+            "lineHeight": {
+              "type": [
+                "number",
+                "string"
+              ]
+            },
+            "letterSpacing": {
+              "type": [
+                "number",
+                "string"
+              ]
+            },
+            "paragraphSpacing": {
+              "type": [
+                "number",
+                "string"
+              ]
+            },
+            "textCase": {
+              "enum": [
+                "ORIGINAL",
+                "UPPER",
+                "LOWER",
+                "TITLE"
+              ]
+            },
+            "textDecoration": {
+              "enum": [
+                "NONE",
+                "UNDERLINE",
+                "STRIKETHROUGH"
+              ]
+            },
+            "description": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  },
+  "example": {
+    "styles": [
+      {
+        "name": "Heading/H1",
+        "fontFamily": "Inter",
+        "fontStyle": "Bold",
+        "fontSize": 32,
+        "lineHeight": "120%"
+      },
+      {
+        "name": "Body/M",
+        "fontFamily": "Inter",
+        "fontSize": 16,
+        "lineHeight": 24
+      }
+    ]
+  }
+}

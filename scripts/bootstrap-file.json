@@ -1,0 +1,90 @@
+{
+  "description": "Set up a new file: pages, then optional tokens, text and effect styles in one call",
+  "checkpoint": true,
+  "timeout": 180,
+  "args": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "pages": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "tokens": {
+        "type": "object"
+      },
+      "textStyles": {
+        "type": "object"
+      },
+      "effectStyles": {
+        "type": "object"
+      }
+    }
+  },
+  "example": {
+    "pages": [
+      "Cover",
+      "Tokens",
+      "Components",
+      "Screens"
+    ],
+    "tokens": {
+      "collection": "Color",
+      "modes": [
+        "Light",
+        "Dark"
+      ],
+      "tokens": {
+        "palette": {
+          "$type": "color",
+          "blue": {
+            "500": {
+              "$value": "#2563eb"
+            }
+          },
+          "gray": {
+            "100": {
+              "$value": "#f3f4f6"
+            },
+            "500": {
+              "$value": "#374151"
+            }
+          }
+        },
+        "bg": {
+          "default": {
+            "$value": {
+              "Light": "{palette.gray.100}",
+              "Dark": "{palette.gray.500}"
+            },
+            "$scopes": [
+              "fill"
+            ]
+          },
+          "brand": {
+            "$value": "{palette.blue.500}",
+            "$scopes": [
+              "fill"
+            ]
+          }
+        },
+        "text": {
+          "default": {
+            "$value": "{palette.gray.500}",
+            "$modes": {
+              "Dark": "{palette.gray.100}"
+            },
+            "$scopes": [
+              "text"
+            ],
+            "$codeSyntax": {
+              "WEB": "var(--text-default)"
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "description": "Lay out a component set's variants as a grid (columns = one property)",
+  "args": {
+    "type": "object",
+    "required": [
+      "set"
+    ],
+    "additionalProperties": false,
+    "properties": {
+      "set": {
+        "type": "string"
+      },
+      "columns": {
+        "type": "string"
+      },
+      "gap": {
+        "type": "number",
+        "minimum": 0
+      },
+      "padding": {
+        "type": "number",
+        "minimum": 0
+      }
+    }
+  },
+  "example": {
+    "set": "sel",
+    "columns": "Size",
+    "gap": 24
+  }
+}

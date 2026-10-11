@@ -1,0 +1,38 @@
+{
+  "description": "Bind loose hex fills/strokes, radii, gaps and padding to matching variables",
+  "checkpoint": true,
+  "timeout": 120,
+  "args": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "root": {
+        "type": "string"
+      },
+      "collection": {
+        "type": "string"
+      },
+      "colors": {
+        "type": [
+          "object",
+          "boolean"
+        ]
+      },
+      "radius": {
+        "type": [
+          "object",
+          "boolean"
+        ]
+      },
+      "spacing": {
+        "type": [
+          "object",
+          "boolean"
+        ]
+      }
+    }
+  },
+  "example": {
+    "root": "sel"
+  }
+}

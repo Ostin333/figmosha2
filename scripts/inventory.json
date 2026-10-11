@@ -1,0 +1,22 @@
+{
+  "description": "Compact overview: collections, styles, component sets with their variant props",
+  "args": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "pages": {
+        "enum": [
+          "all",
+          "current"
+        ]
+      },
+      "limit": {
+        "type": "integer",
+        "minimum": 1
+      }
+    }
+  },
+  "example": {
+    "pages": "all"
+  }
+}

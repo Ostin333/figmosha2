@@ -1,0 +1,105 @@
+{
+  "description": "Create or update variable collections, modes and variables from a DTCG-style spec (idempotent)",
+  "checkpoint": true,
+  "timeout": 120,
+  "args": {
+    "type": "object",
+    "properties": {
+      "collection": {
+        "type": "string"
+      },
+      "modes": {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+          "type": "string"
+        }
+      },
+      "tokens": {
+        "type": "object"
+      },
+      "collections": {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+          "type": "object",
+          "required": [
+            "collection",
+            "tokens"
+          ],
+          "properties": {
+            "collection": {
+              "type": "string"
+            },
+            "modes": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string"
+              }
+            },
+            "tokens": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    }
+  },
+  "example": {
+    "collection": "Color",
+    "modes": [
+      "Light",
+      "Dark"
+    ],
+    "tokens": {
+      "palette": {
+        "$type": "color",
+        "blue": {
+          "500": {
+            "$value": "#2563eb"
+          }
+        },
+        "gray": {
+          "100": {
+            "$value": "#f3f4f6"
+          },
+          "500": {
+            "$value": "#374151"
+          }
+        }
+      },
+      "bg": {
+        "default": {
+          "$value": {
+            "Light": "{palette.gray.100}",
+            "Dark": "{palette.gray.500}"
+          },
+          "$scopes": [
+            "fill"
+          ]
+        },
+        "brand": {
+          "$value": "{palette.blue.500}",
+          "$scopes": [
+            "fill"
+          ]
+        }
+      },
+      "text": {
+        "default": {
+          "$value": "{palette.gray.500}",
+          "$modes": {
+            "Dark": "{palette.gray.100}"
+          },
+          "$scopes": [
+            "text"
+          ],
+          "$codeSyntax": {
+            "WEB": "var(--text-default)"
+          }
+        }
+      }
+    }
+  }
+}

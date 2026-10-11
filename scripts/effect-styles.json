@@ -1,0 +1,80 @@
+{
+  "description": "Create or update effect styles (shadows, blurs)",
+  "checkpoint": true,
+  "args": {
+    "type": "object",
+    "required": [
+      "styles"
+    ],
+    "properties": {
+      "styles": {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+          "type": "object",
+          "required": [
+            "name",
+            "effects"
+          ],
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            },
+            "effects": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "enum": [
+                      "DROP_SHADOW",
+                      "INNER_SHADOW",
+                      "LAYER_BLUR",
+                      "BACKGROUND_BLUR"
+                    ]
+                  },
+                  "color": {
+                    "type": "string"
+                  },
+                  "x": {
+                    "type": "number"
+                  },
+                  "y": {
+                    "type": "number"
+                  },
+                  "blur": {
+                    "type": "number"
+                  },
+                  "spread": {
+                    "type": "number"
+                  },
+                  "radius": {
+                    "type": "number"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "example": {
+    "styles": [
+      {
+        "name": "Elevation/1",
+        "effects": [
+          {
+            "color": "#0000001a",
+            "y": 2,
+            "blur": 4
+          }
+        ]
+      }
+    ]
+  }
+}

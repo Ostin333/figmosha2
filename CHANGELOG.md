@@ -10,6 +10,89 @@ code it started with, so new helpers won't exist until you do. If
 
 ## [Unreleased]
 
+Upgrading: restart the bridge, then **re-import** the plugin (the manifest changed), run
+`figmosha token` and paste the token into the plugin bar once — it is remembered for every file.
+
+### Security
+
+- **Bridge token.** On first start the bridge creates `~/.figmosha/token` (directory `0700`, file
+  `0600`; `$FIGMOSHA_TOKEN` overrides it; `$FIGMOSHA_HOME` moves the directory). HTTP callers send
+  `Authorization: Bearer <token>` — the `figmosha` CLI does it by itself — and the plugin sends it in
+  `hello`. The plugin connection always needs it (close 4401 otherwise, and a connection that sends
+  no valid `hello` within 5 s is closed). Over HTTP a wrong token is a 401; a missing one is still
+  accepted until 3.0, with a `notice` in every reply — `--require-token` refuses it now.
+  `--insecure-no-token` turns the token off. This closes the hole where any web page could open
+  `ws://localhost:8787/plugin` from a sandboxed iframe (`Origin: null`), register as a plugin and
+  receive the scripts meant for Figma.
+- **The plugin asks for the token.** Without it the bar turns red with a field:
+  paste the output of `figmosha token` and press Enter. It is kept in `figma.clientStorage`.
+- **A plugin connection only counts once it is admitted**: before a valid `hello` it gets no
+  `exec`, `peers` or `update`. Replies are only accepted from the connection a script was sent to.
+  A malformed `hello` is logged by size only, never its content.
+- **Limits**: 32 admitted plugin connections and 8 not yet admitted (close 4429), 64 callers waiting per file (503 `queue full`,
+  nothing run), 5 `hello`s a second per connection, timeouts up to 600 s (`--allow-long` for 3600).
+- **`figmosha token`** copies the token to the clipboard (`--show` prints it); `figmosha doctor`
+  reports a missing or world-readable token file and files connected without the token.
+- The 409 interlock error no longer suggests `"force": true`; `/clear` and `force` are logged
+  with the caller's agent name.
+- `start-bridge.sh` keeps its log and pid file in `${XDG_STATE_HOME:-~/.local/state}/figmosha/`
+  (mode `0700`) instead of `/tmp`, kills only a pid file it owns that names `bridge.py`, and passes
+  extra flags to the bridge. `start-bridge.ps1` logs to `%LOCALAPPDATA%\figmosha\`.
+- The manifest drops the unused `activeusers` and `fileusers` permissions.
+- The Update button only opens URLs under `https://github.com/denysosadchyi/figmosha2/`.
+
+### Added
+
+- **Ready-made scripts, run by name.** `figmosha run <name> --args @spec.json` sends
+  `scripts/<name>.js` with JSON arguments; the agent writes the spec, not the code. `run --list`,
+  `run <name> --schema` and `--example`; arguments are checked against the script's schema before
+  anything reaches Figma. `$FIGMOSHA_SCRIPTS` adds your own script folders. Shipped: `setup-tokens`,
+  `export-tokens`, `text-styles`, `effect-styles`, `component-set`, `arrange`, `bind-auto`,
+  `inventory`, `lint`, `bootstrap-file`.
+- **`args` for every exec.** `/exec` takes `args` (any JSON), available to the script as `args`;
+  `figmosha exec --args '{...}'` or `--args @file.json`.
+- **Design-system helpers**, all "validate everything, then write" and idempotent (upsert by name):
+  `h.tokens(spec)` (DTCG-style groups, `$type` inheritance, per-mode values or `$modes`, aliases
+  `{palette.blue.500}` across collections, `$scopes` with shorthands like `fill`/`text`/`gap`,
+  `$codeSyntax`, `$description`), `h.exportTokens(collection?)` (round-trips into `h.tokens`),
+  `h.textStyles`, `h.effectStyles`, `h.componentSet` (variant matrix + rules, padding/radius/gap/
+  colours bound to variables, a TEXT property for the label, BOOLEAN properties, grid layout;
+  re-running restyles in place and adds only missing variants), `h.arrange`, `h.bindAuto`,
+  `h.inventory`, `h.lint`, `h.brief`. A spec with problems throws one error listing all of them and
+  changes nothing.
+- **Version-history checkpoints.** `h.checkpoint(label)`, `"checkpoint": "<label>"` on `/exec`
+  (`--checkpoint` in the CLI); scripts that write in bulk take one automatically
+  (`--no-checkpoint` skips it).
+- **One undo step per exec.** The plugin calls `figma.commitUndo()` before and after every script,
+  so Cmd+Z in Figma takes back exactly one agent call.
+- **`mutated`** in exec replies, failures included: `true` when the document changed while the script
+  ran (in files where the plugin can only watch the current page, an edit by a person counts too),
+  `null` when no change was seen — Figma reports changes asynchronously, so that is "probably not",
+  never a promise. The CLI warns when a failed script left changes behind.
+- **`max_result`** on `/exec`: results over that many bytes are cut (lists to whole items) and the
+  reply says `truncated: {shown, total, unit}`. The CLI asks for 8 KB; `--full` lifts it.
+- `bench/`: the three benchmark scenarios, a run-record format and `bench/summarize.py`.
+- `tests/live_ds.py`: tokens + Button set twice against a real file, checks the second run is a no-op.
+- **Agent skills** in `skills/`: `figmosha-core`, `figmosha-design-tokens`, `figmosha-components`,
+  `figmosha-styles`, `figmosha-ds-audit`, `figmosha-build-screen`, `figmosha-history`,
+  `figmosha-maintainer`. `figmosha skills install` links them into `~/.claude/skills` and
+  `~/.agents/skills` (Codex); `--project DIR` installs into a project instead, `--copy` copies.
+- **`figmosha new`** (experimental): opens `https://figma.new`, waits for the plugin to be run in the
+  new file and prints its doc id. `--no-open` just waits. Whether Figma Desktop or the browser opens
+  the link depends on the machine.
+- **Figma REST, read-only**: `figmosha figma-token` stores a personal access token in
+  `~/.figmosha/figma_token` (`0600`, or `$FIGMA_TOKEN`); `figmosha link -T <file> <URL>` remembers
+  the file key a dev plugin cannot see; `figmosha rest versions|comments|images -T <file>`.
+
+### Changed
+
+- **AGENTS.md is 5 KB instead of 22 KB.** The rules agents need on every call stay; the queue and
+  timeout design moved to `docs/concurrency.md`, helper details to `docs/plugin-api.md`, running
+  and releasing to `docs/maintaining.md`.
+- **Shorter CLI output.** No `(Nms)` line, no stack trace (use `--raw`); `tree` defaults to depth 2
+  without sizes (`--size`, `--depth N`, or `--full` for everything); `find` returns `id, name, type`
+  unless it matches on text or `--full` is given.
+
 ## [2.3.0] — 2026-10-06
 
 ### Changed
