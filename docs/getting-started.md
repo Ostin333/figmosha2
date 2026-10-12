@@ -169,6 +169,30 @@ Ready-made scripts: `setup-tokens`, `export-tokens`, `text-styles`, `effect-styl
 | `504` | The script may still be running; the file is locked until it ends |
 | `h.X is not a function` | The plugin runs old code — re-run it (⌘⌥P) |
 | Nothing works after a reboot | Start the bridge again, then the plugin |
+| A long task stalls until you touch Figma | Figma is asleep in the background — see below |
+
+### A long task stalls until you touch Figma
+
+**Symptom.** During a big task nothing happens for a long time, and the work continues only when you
+move something in Figma. The agent may get a `504` while the script keeps running, and the file stays
+locked until it ends.
+
+**Cause.** Figma Desktop is an Electron (Chromium) app. When its window is in the background or
+covered by another window, macOS App Nap and Chromium's background throttling slow it down. Scripts run
+inside Figma, so every `await` (fonts, `getNodeByIdAsync`, images) waits until Figma wakes up.
+
+**Fix.**
+
+1. Turn App Nap off for Figma (macOS, once):
+   ```bash
+   defaults write com.figma.Desktop NSAppSleepDisabled -bool YES
+   ```
+   Then quit Figma completely (⌘Q) and open it again. To undo:
+   `defaults delete com.figma.Desktop NSAppSleepDisabled`.
+2. During long tasks keep the Figma window at least partly visible — don't minimise it or leave it
+   on another desktop (Space).
+3. If it is already stuck, click or scroll in the Figma window to wake it. After a `504`, wait for the
+   script to finish rather than running `figmosha clear`.
 
 More: [README](../README.md), [concurrency.md](concurrency.md) (several files and agents),
 [plugin-api.md](plugin-api.md) (the `h.*` helpers, spec formats).

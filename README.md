@@ -543,6 +543,7 @@ chain and tells you which link is broken.
 | `curl ... -d '{"code":...}'` fails in Windows PowerShell | `curl` there is an alias for `Invoke-WebRequest` | Call `curl.exe` explicitly, or just use `python figmosha.py` |
 | `403 cross-origin requests are not allowed` | Something is adding an `Origin` header | Talk to the bridge directly, not through a proxy or a browser |
 | `409 ... different documents sharing a name` | Two distinct files are open under the same `figma.root.name` | Close one — the bridge won't guess which you meant |
+| A long task stalls until you move something in Figma | macOS App Nap / Chromium throttle the Figma window while it is in the background | `defaults write com.figma.Desktop NSAppSleepDisabled -bool YES`, restart Figma (⌘Q), keep its window visible during long tasks — [details](docs/getting-started.md#a-long-task-stalls-until-you-touch-figma) |
 | A tab stopped answering `exec` | Its socket dropped (laptop slept, bridge restarted) | Re-Run the plugin in that tab (`⌘⌥P`); it re-registers by file name |
 | Helper missing: `h.X is not a function` | The running plugin still has the code it started with | Re-run the plugin in Figma after syncing `plugin/` |
 
